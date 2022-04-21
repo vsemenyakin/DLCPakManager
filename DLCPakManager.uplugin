@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "DLCPakManager",
+	"Description": "Plugin for simplifying support of Patching and Downloadable Content (DLC) features",
+	"Category": "ContentStreaming",
+	"CreatedBy": "Volodymyr Semenyakin",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "DLCPakManager",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}
