@@ -45,7 +45,8 @@ private:
 	FDLCPackageManager(const FString& DeploymentName, const FString& ContentBuildId);
 	
 	TOptional<int32> GetChunkIdForDLCChunkId(const FString& DLCChunkId) const;
-
+	FString GetChunkDownloaderCachedManifestFilePath() const;
+	
 	TFuture<void> DownloadDLCChunk(const FString& DLCChunkID);
 
 	const DLCPackageManagerPrivate::FHackingType_ChunkDownloader& GetChunkDownloaderHackedAccess() const;

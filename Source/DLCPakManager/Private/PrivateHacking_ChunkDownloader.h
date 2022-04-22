@@ -10,6 +10,8 @@ namespace DLCPackageManagerPrivate
 	public:
 		//TODO: Add static_assert for checking Unreal version range
 
+		static const FString CACHED_BUILD_MANIFEST;
+		
 		typedef TFunction<void(bool bSuccess)> FCallback;
 
 		struct FStats

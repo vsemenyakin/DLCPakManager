@@ -7,6 +7,7 @@
 #include "ChunkDownloader.h"
 #include "Engine/StreamableManager.h"
 #include "Engine/AssetManager.h"
+#include "GenericPlatform/GenericPlatformFile.h"
 
 namespace DLCPackageManagerPrivate
 {
@@ -57,6 +58,8 @@ namespace DLCPackageManagerPrivate
 	{
 		return FString::Printf(TEXT("Downloading DLC chunk [%s]"), *DLCChunkID);
 	}
+
+	const FString MovedFilePrefix = TEXT(".renamed");
 }
 
 FDLCPackageManager::FDLCPackageManager(const FString& DeploymentName, const FString& ContentBuildId)
@@ -68,9 +71,35 @@ FDLCPackageManager::FDLCPackageManager(const FString& DeploymentName, const FStr
 	//TODO: Find why CDN manifest was not reloaded
 	// load the cached build ID
 	ChunkDownloader->Initialize("Windows", 8);
-	ChunkDownloader->LoadCachedBuild(DeploymentName);
-	ChunkDownloader->UpdateBuild(DeploymentName, ContentBuildId, [this](bool bSuccess)
+
+	//NB: We remove build manifest cache to force uploading of all actual DLC files list
+	struct FChunkDownloaderCacheMovingState
 	{
+		bool bMovedCacheExist;
+		FString OriginalCachePath;
+		FString MovedCachePath;
+	};
+
+	FChunkDownloaderCacheMovingState CacheMovingState;
+	CacheMovingState.OriginalCachePath = GetChunkDownloaderCachedManifestFilePath();
+	CacheMovingState.MovedCachePath = CacheMovingState.OriginalCachePath + DLCPackageManagerPrivate::MovedFilePrefix;
+	CacheMovingState.bMovedCacheExist = IPlatformFile::GetPlatformPhysical().MoveFile(*CacheMovingState.OriginalCachePath, *CacheMovingState.MovedCachePath);
+	
+	ChunkDownloader->UpdateBuild(DeploymentName, ContentBuildId, [this, CacheMovingState = MoveTemp(CacheMovingState), DeploymentName](bool bSuccess)
+	{
+		if (CacheMovingState.bMovedCacheExist)
+		{
+			if (bSuccess)
+			{
+				IPlatformFile::GetPlatformPhysical().DeleteFile(*GetChunkDownloaderCachedManifestFilePath());
+			}
+			else
+			{
+				IPlatformFile::GetPlatformPhysical().MoveFile(*CacheMovingState.MovedCachePath, *CacheMovingState.OriginalCachePath);
+				ChunkDownloader->LoadCachedBuild(DeploymentName);
+			}
+		}
+
 		this->PackageManagerInitializationPromise->SetValue();
 	});
 }
@@ -173,8 +202,7 @@ FDLCPackageManager::~FDLCPackageManager()
 
 TOptional<int32> FDLCPackageManager::GetChunkIdForDLCChunkId(const FString& DLCChunkId) const
 {
-	auto& ChunkDownloaderHacked = DLCPackageManagerPrivate::GetHackedType<DLCPackageManagerPrivate::FHackingType_ChunkDownloader>(
-		*ChunkDownloader.Get());
+	const auto& ChunkDownloaderHacked = GetChunkDownloaderHackedAccess();
 	
 	using FPakFile = DLCPackageManagerPrivate::FHackingType_ChunkDownloader::FPakFile;
 	for (const TPair<FString, TSharedRef<FPakFile>>& PakFile : ChunkDownloaderHacked.PakFiles)
@@ -183,7 +211,14 @@ TOptional<int32> FDLCPackageManager::GetChunkIdForDLCChunkId(const FString& DLCC
 
 	return { };
 }
-	
+
+FString FDLCPackageManager::GetChunkDownloaderCachedManifestFilePath() const
+{
+	const auto& ChunkDownloaderHacked = GetChunkDownloaderHackedAccess();
+
+	return ChunkDownloaderHacked.CacheFolder / ChunkDownloaderHacked.CACHED_BUILD_MANIFEST;
+}
+
 TFuture<void> FDLCPackageManager::DownloadDLCChunk(const FString& DLCChunkID)
 {
 	UE_LOG(LogDLCLoading, VeryVerbose, TEXT("%s status: Start"),
@@ -261,4 +296,9 @@ TFuture<void> FDLCPackageManager::DownloadDLCChunk(const FString& DLCChunkID)
 		*DLCPackageManagerPrivate::GetDLCChunkDownloadingLogPrefix(DLCChunkID));
 	
 	return DLCPackageManagerPrivate::FilledFuture();
+}
+
+const DLCPackageManagerPrivate::FHackingType_ChunkDownloader& FDLCPackageManager::GetChunkDownloaderHackedAccess() const
+{
+	return DLCPackageManagerPrivate::GetHackedType<DLCPackageManagerPrivate::FHackingType_ChunkDownloader>(*ChunkDownloader.Get());
 }
