@@ -1,6 +1,7 @@
 #include "DLCPackageManagerBlueprintFunctions.h"
 #include "DLCPackageManager.h"
 
+#include "Engine/Engine.h"
 #include "LatentActions.h"
 
 template<typename T_FutureResult>

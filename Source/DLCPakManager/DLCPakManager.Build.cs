@@ -22,13 +22,5 @@ public class DLCPakManager : ModuleRules
                 "ChunkDownloader",
             }
 			);
-
-
-        PrivateIncludePaths.AddRange(
-            new string[]
-            {
-                "ChunkDownloader",
-            }
-            );
     }
 }

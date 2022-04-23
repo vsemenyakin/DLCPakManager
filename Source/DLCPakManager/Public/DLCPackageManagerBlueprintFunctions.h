@@ -1,6 +1,9 @@
 #pragma once
 
 #include "Kismet/BlueprintFunctionLibrary.h"
+#include "UObject/SoftObjectPtr.h"
+#include "Templates/SubclassOf.h"
+#include "Engine/LatentActionManager.h"
 #include "DLCPackageManagerBlueprintFunctions.generated.h"
 
 UCLASS()

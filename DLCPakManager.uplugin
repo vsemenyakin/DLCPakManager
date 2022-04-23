@@ -1,22 +1,30 @@
 {
-	"FileVersion": 3,
+	"FileVersion": 4,
 	"Version": 1,
-	"VersionName": "1.0",
+	"VersionName": "0.3",
 	"FriendlyName": "DLCPakManager",
-	"Description": "Plugin for simplifying support of Patching and Downloadable Content (DLC) features",
+	"Description": "Plugin for simplifying support of Patching and Downloadable Content (DLC) delivery features",
 	"Category": "ContentStreaming",
 	"CreatedBy": "Volodymyr Semenyakin",
 	"CreatedByURL": "",
 	"DocsURL": "",
 	"MarketplaceURL": "",
-	"SupportURL": "",
+	"SupportURL": "semenyakinVS@gmail.com",
 	"CanContainContent": false,
-	"IsBetaVersion": false,
+	"IsBetaVersion": true,
 	"IsExperimentalVersion": false,
 	"Installed": false,
 	"Modules": [
 		{
 			"Name": "DLCPakManager",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "ChunkDownloader",
+			"Enabled": true,
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
 		}
