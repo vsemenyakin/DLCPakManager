@@ -2,68 +2,23 @@
 #include "Async.h"
 #include "PrivateHacking.h"
 #include "PrivateHacking_ChunkDownloader.h"
+#include "Version.h"
+#include "DLCPackageManager_Private.h"
 #include "DLCPackageManager_Debug.h"
 
 #include "ChunkDownloader.h"
 #include "Engine/StreamableManager.h"
 #include "Engine/AssetManager.h"
 #include "GenericPlatform/GenericPlatformFile.h"
-
-namespace DLCPackageManagerPrivate
-{
-	FString GetLoadingLogPrefix(const FSoftObjectPtr& SoftObjectPtr)
-	{
-		return FString::Printf(TEXT("Loading of object [%s]"), *SoftObjectPtr.ToString());
-	}
-
-	TOptional<FString> GetDLCChunkId(const FSoftObjectPtr& SoftObjectPtr)
-	{
-		const FSoftObjectPath& SoftObjectPath = SoftObjectPtr.ToSoftObjectPath();
-		
-		if (SoftObjectPath.IsNull())
-			return { };
-
-		TArray<FString> PathElements;
-		SoftObjectPath.ToString().ParseIntoArray(PathElements, TEXT("/"));
-
-		// Check path root: is "Game" root and is not last in path
-
-		static const FString RootName{ TEXT("Game") };
-		const int32 RootPathElementIndex = PathElements.IndexOfByKey(RootName);
-		if (RootPathElementIndex == INDEX_NONE || (RootPathElementIndex == PathElements.Num() - 1))
-			return { };
-
-		// Check if sub-root is DLC root
-
-		const FString& SubRootPathElement = PathElements[RootPathElementIndex + 1];
-		static const FString DLCSubRootPathElementPrefix{ TEXT("DLC_") };
-
-		FString BeforePrefixString;
-		FString AfterPrefixString;
-		SubRootPathElement.Split(DLCSubRootPathElementPrefix, &BeforePrefixString, &AfterPrefixString, ESearchCase::CaseSensitive);
-
-		//Check if there is some text before DLC prefix (should be no text)
-		if (!BeforePrefixString.IsEmpty())
-			return { };
-
-		return { MoveTemp(AfterPrefixString) };
-	}
-
-	const FString& GetDLCChunkIDForPakFileEntry(const FPakFileEntry& PakFileEntry)
-	{
-		return PakFileEntry.FileVersion;
-	}
-
-	FString GetDLCChunkDownloadingLogPrefix(const FString& DLCChunkID)
-	{
-		return FString::Printf(TEXT("Downloading DLC chunk [%s]"), *DLCChunkID);
-	}
-
-	const FString MovedFilePrefix = TEXT(".renamed");
-}
+#include "Algo/MaxElement.h"
 
 FDLCPackageManager::FDLCPackageManager(const FString& DeploymentName, const FString& ContentBuildId)
 {
+	using EPrintType = FDLCPackageManager_Debug::EPrintType;
+	FDLCPackageManager_Debug::FLogging_Initialization Logging{ };
+
+	Logging.PrintLog(EPrintType::Status, TEXT("Started"));
+
 	ChunkDownloader = FChunkDownloader::GetOrCreate();
 	PackageManagerInitializationPromise = MakeShared<TMultiPromise<void>>();
 	
@@ -82,11 +37,18 @@ FDLCPackageManager::FDLCPackageManager(const FString& DeploymentName, const FStr
 
 	FChunkDownloaderCacheMovingState CacheMovingState;
 	CacheMovingState.OriginalCachePath = GetChunkDownloaderCachedManifestFilePath();
-	CacheMovingState.MovedCachePath = CacheMovingState.OriginalCachePath + DLCPackageManagerPrivate::MovedFilePrefix;
+	CacheMovingState.MovedCachePath = CacheMovingState.OriginalCachePath + FDLCPackageManager_Private::MovedFilePrefix;
 	CacheMovingState.bMovedCacheExist = IPlatformFile::GetPlatformPhysical().MoveFile(*CacheMovingState.OriginalCachePath, *CacheMovingState.MovedCachePath);
-	
-	ChunkDownloader->UpdateBuild(DeploymentName, ContentBuildId, [this, CacheMovingState = MoveTemp(CacheMovingState), DeploymentName](bool bSuccess)
+
+	if (!CacheMovingState.bMovedCacheExist)
 	{
+		Logging.PrintLog(EPrintType::StatusImportant, TEXT("There where no manifrst file cache"));
+	}
+
+	ChunkDownloader->UpdateBuild(DeploymentName, ContentBuildId, [this, CacheMovingState = MoveTemp(CacheMovingState), DeploymentName, Logging](bool bSuccess)
+	{
+		Logging.PrintLog(EPrintType::Status, TEXT("Build updated %s"), bSuccess ? TEXT("successful") : TEXT("unsuccessful"));
+
 		if (CacheMovingState.bMovedCacheExist)
 		{
 			if (bSuccess)
@@ -99,6 +61,8 @@ FDLCPackageManager::FDLCPackageManager(const FString& DeploymentName, const FStr
 				ChunkDownloader->LoadCachedBuild(DeploymentName);
 			}
 		}
+
+		Initialize_PackagesInfo();
 
 		this->PackageManagerInitializationPromise->SetValue();
 	});
@@ -114,78 +78,68 @@ FDLCPackageManager& FDLCPackageManager::Get()
 	
 TFuture<UObject*> FDLCPackageManager::GetLoadedPath(const FSoftObjectPtr& SoftObjectPtr)
 {
-	UE_LOG(LogDLCLoading, VeryVerbose, TEXT("%s status: Requested"),
-		*DLCPackageManagerPrivate::GetLoadingLogPrefix(SoftObjectPtr));
+	using EPrintType = FDLCPackageManager_Debug::EPrintType;
+	FDLCPackageManager_Debug::FLogging_Loading Logging{ SoftObjectPtr };
+
+	Logging.PrintLog(EPrintType::Status, TEXT("Start"));
 	
 	if (SoftObjectPtr.IsNull())
 	{
-		UE_LOG(LogDLCLoading, Warning, TEXT("%s error: Empty soft reference passed"),
-			*DLCPackageManagerPrivate::GetLoadingLogPrefix(SoftObjectPtr));
+		Logging.PrintLog(EPrintType::Warning, TEXT("Empty soft reference passed"));
 		
 		return DLCPackageManagerPrivate::FilledFuture<UObject*>(nullptr);
 	}
 
 	if (SoftObjectPtr.IsValid())
 	{
-		UE_LOG(LogDLCLoading, VeryVerbose, TEXT("%s result: Reference is already resolved"),
-			*DLCPackageManagerPrivate::GetLoadingLogPrefix(SoftObjectPtr));
-		
+		Logging.PrintLog(EPrintType::Status, TEXT("Reference is already resolved"));
+
 		return DLCPackageManagerPrivate::FilledFuture<UObject*>(SoftObjectPtr.Get());
 	}
 
 	auto LoadingPromise = MakeShared<DLCPackageManagerPrivate::TPromiseWithWorkaroundedCanceling<UObject*>>();
 	TFuture<UObject*> LoadingFuture = LoadingPromise->GetFuture();
 
-	UE_LOG(LogDLCLoading, VeryVerbose, TEXT("%s status: Start waiting package manager initialization"),
-		*DLCPackageManagerPrivate::GetLoadingLogPrefix(SoftObjectPtr));
-	
-	PackageManagerInitializationPromise->MakeFuture().Next([LoadingPromise, SoftObjectPtr, this](int32)
+	Logging.PrintLog(EPrintType::Status, TEXT("Start waiting package manager initialization"));
+
+	PackageManagerInitializationPromise->MakeFuture().Next([LoadingPromise, SoftObjectPtr, this, Logging](int32)
 	{
-		UE_LOG(LogDLCLoading, VeryVerbose, TEXT("%s status: Finish waiting package manager initialization"),
-			*DLCPackageManagerPrivate::GetLoadingLogPrefix(SoftObjectPtr));
+		Logging.PrintLog(EPrintType::Status, TEXT("Finish waiting package manager initialization"));
 		
-		const TOptional<FString> DLCChunkId = DLCPackageManagerPrivate::GetDLCChunkId(SoftObjectPtr);
+		const TOptional<FString> DLCChunkId = FDLCPackageManager_Private::GetDLCChunkId(SoftObjectPtr);
 		
 		TFuture<void> DownloadedDLCChunkFuture;
 
 		if (DLCChunkId.IsSet())
 		{
-			UE_LOG(LogDLCLoading, VeryVerbose, TEXT("%s status: Found chunk [%s] for path. Starting DLC chunk downloading"),
-				*DLCPackageManagerPrivate::GetLoadingLogPrefix(SoftObjectPtr), *DLCChunkId.GetValue());
+			Logging.PrintLog(EPrintType::Status, TEXT("Found chunk [%s] for path. Starting DLC chunk downloading"),
+				*DLCChunkId.GetValue());
 			
 			DownloadedDLCChunkFuture = DownloadDLCChunk(DLCChunkId.GetValue());
 		}
 		else
 		{
-			UE_LOG(LogDLCLoading, VeryVerbose, TEXT("%s status: No DLC chunks for path, reference is expected to be placed in the main package"),
-				*DLCPackageManagerPrivate::GetLoadingLogPrefix(SoftObjectPtr));
+			Logging.PrintLog(EPrintType::Status, TEXT("No DLC chunks for path, reference is expected to be placed in the main package"));
 			
 			DownloadedDLCChunkFuture = DLCPackageManagerPrivate::FilledFuture();
 		}
 
-		DownloadedDLCChunkFuture.Next([LoadingPromise, SoftObjectPtr](int32)
+		DownloadedDLCChunkFuture.Next([LoadingPromise, SoftObjectPtr, Logging](int32)
 		{
-			UE_LOG(LogDLCLoading, VeryVerbose, TEXT("%s status: Asset by soft reference is ready to be loaded to RAM"),
-				*DLCPackageManagerPrivate::GetLoadingLogPrefix(SoftObjectPtr));
+			Logging.PrintLog(EPrintType::Status, TEXT("Asset by soft reference is ready to be loaded to RAM"));
 			
 			UAssetManager* Manager = UAssetManager::GetIfValid();
 			check(Manager);
 			Manager->GetStreamableManager().RequestAsyncLoad(
 				{ SoftObjectPtr.ToSoftObjectPath() },
-				[LoadingPromise, SoftObjectPtr]()
+				[LoadingPromise, SoftObjectPtr, Logging]()
 				{					
 					UObject* Result = SoftObjectPtr.Get();
 
 					if (Result)
-					{
-						UE_LOG(LogDLCLoading, Verbose, TEXT("%s status: Asset is loaded to RAM and ready for use"),
-							*DLCPackageManagerPrivate::GetLoadingLogPrefix(SoftObjectPtr));
-					}
+						Logging.PrintLog(EPrintType::StatusImportant, TEXT("Asset is loaded to RAM and ready for use"));
 					else
-					{
-						UE_LOG(LogDLCLoading, Warning, TEXT("%s error: Unexpected asset loading error"),
-							*DLCPackageManagerPrivate::GetLoadingLogPrefix(SoftObjectPtr));
-					}
+						Logging.PrintLog(EPrintType::StatusImportant, TEXT("Unexpected asset loading error"));
 				
 					LoadingPromise->EmplaceValue(MoveTemp(Result));
 				});
@@ -200,16 +154,56 @@ FDLCPackageManager::~FDLCPackageManager()
 	FChunkDownloader::Shutdown();
 }
 
-TOptional<int32> FDLCPackageManager::GetChunkIdForDLCChunkId(const FString& DLCChunkId) const
+void FDLCPackageManager::Initialize_PackagesInfo()
 {
-	const auto& ChunkDownloaderHacked = GetChunkDownloaderHackedAccess();
-	
-	using FPakFile = DLCPackageManagerPrivate::FHackingType_ChunkDownloader::FPakFile;
-	for (const TPair<FString, TSharedRef<FPakFile>>& PakFile : ChunkDownloaderHacked.PakFiles)
-		if (DLCPackageManagerPrivate::GetDLCChunkIDForPakFileEntry(PakFile.Value->Entry) == DLCChunkId)
-			return { PakFile.Value->Entry.ChunkId };
+	using EPrintType = FDLCPackageManager_Debug::EPrintType;
+	FDLCPackageManager_Debug::FLogging_Initialization Logging{ };
 
-	return { };
+	using FPakFile = DLCPackageManagerPrivate::FHackingType_ChunkDownloader::FPakFile;
+
+	const auto& ChunkDownloaderHacked = GetChunkDownloaderHackedAccess();
+
+	for (const TPair<FString, TSharedRef<FPakFile>>& PakFile : ChunkDownloaderHacked.PakFiles)
+	{
+		const FPakFileEntry& PakFileEntry = PakFile.Value->Entry;
+
+		const FString& DLCChunkID = FDLCPackageManager_Private::GetDLCChunkIDForPakFileEntry(PakFileEntry);
+
+		TOptional<FDLCPackageManager_Private::FParsedDLCChunkID> ParsedDLCChunkIDResult = FDLCPackageManager_Private::ParseDLCChunkID(DLCChunkID);
+		if (!ParsedDLCChunkIDResult.IsSet())
+		{
+			Logging.PrintLog(EPrintType::Error, TEXT("Package info parse failure. Cannot parse package with DLC chunk id [%s], chunk id [%d]. Version ignored"),
+				*DLCChunkID, PakFileEntry.ChunkId);
+
+			continue;
+		}
+
+		const FDLCPackageManager_Private::FParsedDLCChunkID& ParsedDLCChunkID = ParsedDLCChunkIDResult.GetValue();
+		const FString& DLCPackageName = ParsedDLCChunkID.Name;
+
+		FDLCPackage* PackagePtr = FindDLCPackage(DLCPackageName);
+		if (!PackagePtr)
+		{
+			TSharedPtr<FDLCPackage>& NewPackageSharedPtr = DLCPackages[DLCPackages.Emplace()];
+			NewPackageSharedPtr = MakeShared<FDLCPackage>();
+
+			PackagePtr = NewPackageSharedPtr.Get();
+			PackagePtr->Name = DLCPackageName;
+		}
+
+		TArray<FDLCPackage::FVersionInfo>& VersionInfos = PackagePtr->VersionInfos;
+		FDLCPackage::FVersionInfo& NewVersion = VersionInfos[VersionInfos.Emplace()];
+		NewVersion.Version = MakeShared<DLCPackageManagerPrivate::FVersion>(ParsedDLCChunkID.Version);
+	}
+}
+
+const FDLCPackageManager::FDLCPackage::FVersionInfo& FDLCPackageManager::FDLCPackage::GetLatestVersionInfo() const
+{
+	return *Algo::MaxElementBy(
+		VersionInfos,
+		[](const FDLCPackage::FVersionInfo& Version) {
+			return *Version.Version;
+		});
 }
 
 FString FDLCPackageManager::GetChunkDownloaderCachedManifestFilePath() const
@@ -221,79 +215,62 @@ FString FDLCPackageManager::GetChunkDownloaderCachedManifestFilePath() const
 
 TFuture<void> FDLCPackageManager::DownloadDLCChunk(const FString& DLCChunkID)
 {
-	UE_LOG(LogDLCLoading, VeryVerbose, TEXT("%s status: Start"),
-		*DLCPackageManagerPrivate::GetDLCChunkDownloadingLogPrefix(DLCChunkID));
+	using EPrintType = FDLCPackageManager_Debug::EPrintType;
+	FDLCPackageManager_Debug::FLogging_DLCChunkDownloading Logging{ DLCChunkID };
+
+	Logging.PrintLog(EPrintType::Status, TEXT("Start"));
 	
-	const TOptional<int32> PossibleChunkId = GetChunkIdForDLCChunkId(DLCChunkID);
+	FDLCPackage* DLCPackage = FindDLCPackage(DLCChunkID);
 	//TODO: Return error "No chunk with proivded Id"
-	if (!PossibleChunkId.IsSet())
+	if (!DLCPackage)
 	{
-		UE_LOG(LogDLCLoading, Warning, TEXT("%s error: Cannot find Chunk Id for DLC Chunk Id"),
-			*DLCPackageManagerPrivate::GetDLCChunkDownloadingLogPrefix(DLCChunkID));
+		Logging.PrintLog(EPrintType::Warning, TEXT("Cannot find Chunk Id for DLC Chunk Id"));
 		
 		return DLCPackageManagerPrivate::FilledFuture();
 	}
 
-	TSharedPtr<FChunkState>* ChunkStatePtr = DLCChunkStates.Find(DLCChunkID);
-	if (!ChunkStatePtr)
+	FDLCPackage::FStatus& PackageStatus = DLCPackage->Status;
+	if (PackageStatus.IsType<FDLCPackage::FStatus_NotDownloaded>())
 	{
-		UE_LOG(LogDLCLoading, VeryVerbose, TEXT("%s status: DLC chunk with Chunk Id [%d] is downloading first time"),
-			*DLCPackageManagerPrivate::GetDLCChunkDownloadingLogPrefix(DLCChunkID), PossibleChunkId.GetValue());
+		PackageStatus.Emplace<FDLCPackage::FStatus_DownloadingAndMounting>();
+		PackageStatus.Get<FDLCPackage::FStatus_DownloadingAndMounting>().Promise = MakeShared<TMultiPromise<void>>();
 		
-		auto NewChunkState = MakeShared<FChunkState>(TInPlaceType<FChunkState_NotDownloaded>{ }, FChunkState_NotDownloaded{ });
-		ChunkStatePtr = &DLCChunkStates.Add(DLCChunkID, MoveTemp(NewChunkState));
-	}
+		const FDLCPackageManager::FDLCPackage::FVersionInfo& VersionInfo = DLCPackage->GetLatestVersionInfo();
+		const int32 VersionChunkId = VersionInfo.ChunkId;
 
-	FChunkState& ChunkState = **ChunkStatePtr;
-
-	if (ChunkState.IsType<FChunkState_NotDownloaded>())
-	{
-		ChunkState.Emplace<FChunkState_DownloadingAndMounting>();
-		auto& ChunkState_DownloadingAndMounting = ChunkState.Get<FChunkState_DownloadingAndMounting>();
-		ChunkState_DownloadingAndMounting.Promise = MakeUnique<TMultiPromise<void>>();
-		
-		UE_LOG(LogDLCLoading, VeryVerbose,
-			TEXT("%s status: DLC Chunk had [NotDownloaded] state. Switching to [DownloadingAndMounting] state"),
-			*DLCPackageManagerPrivate::GetDLCChunkDownloadingLogPrefix(DLCChunkID), PossibleChunkId.GetValue());
-		
-		const int32 ChunkId = PossibleChunkId.GetValue();
+		Logging.PrintLog(EPrintType::Status, TEXT("DLC Chunk had [NotDownloaded] state. Switching to [DownloadingAndMounting] state. DLC version [%s] aka chunk pak [%d]"),
+			*VersionInfo.Version->ToString(), VersionChunkId);
 		
 		//TODO: Put here tracking of concrete chunk loading process
-		ChunkDownloader->DownloadChunks({ ChunkId }, [](const bool bSuccess){ }, 1);
+		ChunkDownloader->DownloadChunks({ VersionChunkId }, [](const bool bSuccess){ }, 1);
 
-		ChunkDownloader->BeginLoadingMode([this, &ChunkState, ChunkId, Debug_DLCChunkID = DLCChunkID](const bool bSuccess)
+		ChunkDownloader->BeginLoadingMode([this, &PackageStatus, VersionChunkId, Debug_DLCChunkID = DLCChunkID, Logging](const bool bSuccess)
 		{
 			//TODO: Check if "this" is OK
-			this->ChunkDownloader->MountChunk(ChunkId, [&ChunkState, Debug_DLCChunkID](const bool bSuccess)
+			this->ChunkDownloader->MountChunk(VersionChunkId, [&PackageStatus, Debug_DLCChunkID, Logging](const bool bSuccess)
 			{
-				UE_LOG(LogDLCLoading, VeryVerbose,
-					TEXT("%s status: DLC Chunk had [DownloadingAndMounting] state. After filling promise it finaly will have [Mounted] state"),
-					*DLCPackageManagerPrivate::GetDLCChunkDownloadingLogPrefix(Debug_DLCChunkID));
+				Logging.PrintLog(EPrintType::Status, TEXT("DLC Chunk had [DownloadingAndMounting] state. After filling promise it finaly will have [Mounted] state"));
 				
 				//TODO: Check if "this" is OK
 				//TODO: Move promise and setup "FChunkState_Mounted" state before filling promise for more consistent state in callbacks after filling promise
-				ChunkState.Get<FChunkState_DownloadingAndMounting>().Promise->SetValue();
+				PackageStatus.Get<FDLCPackage::FStatus_DownloadingAndMounting>().Promise->SetValue();
 
-				ChunkState.Emplace<FChunkState_Mounted>();
+				PackageStatus.Emplace<FDLCPackage::FStatus_Mounted>();
 			});
 		});
 	}
 	
-	if (auto* ChunkState_DownloadingAndMounting = ChunkState.TryGet<FChunkState_DownloadingAndMounting>())
+	if (auto* ChunkState_DownloadingAndMounting = PackageStatus.TryGet<FDLCPackage::FStatus_DownloadingAndMounting>())
 	{
-		UE_LOG(LogDLCLoading, VeryVerbose,
-			TEXT("%s status: Actually started downloading request. Waiting [DownloadingAndMounting] finish"),
-			*DLCPackageManagerPrivate::GetDLCChunkDownloadingLogPrefix(DLCChunkID));
+		Logging.PrintLog(EPrintType::Status, TEXT("Actually started downloading request. Waiting [DownloadingAndMounting] finish"));
 		
 		return ChunkState_DownloadingAndMounting->Promise->MakeFuture();
 	}
 
 	//TODO: Put "Success" result info
-	check(ChunkState.IsType<FChunkState_Mounted>());
+	check(PackageStatus.IsType<FDLCPackage::FStatus_Mounted>());
 
-	UE_LOG(LogDLCLoading, Verbose,
-		TEXT("%s status: DLC Chunk is finaly in [FChunkState_Mounted] state. Immediately return filled future"),
-		*DLCPackageManagerPrivate::GetDLCChunkDownloadingLogPrefix(DLCChunkID));
+	Logging.PrintLog(EPrintType::Status, TEXT("DLC Chunk is finaly in [FChunkState_Mounted] state. Return filled future"));
 	
 	return DLCPackageManagerPrivate::FilledFuture();
 }
@@ -301,4 +278,19 @@ TFuture<void> FDLCPackageManager::DownloadDLCChunk(const FString& DLCChunkID)
 const DLCPackageManagerPrivate::FHackingType_ChunkDownloader& FDLCPackageManager::GetChunkDownloaderHackedAccess() const
 {
 	return DLCPackageManagerPrivate::GetHackedType<DLCPackageManagerPrivate::FHackingType_ChunkDownloader>(*ChunkDownloader.Get());
+}
+
+const FDLCPackageManager::FDLCPackage* FDLCPackageManager::FindDLCPackage(const FString& PackageName) const
+{
+	const TSharedPtr<FDLCPackage>* DLCPackagePtrPtr = DLCPackages.FindByPredicate(
+		[&PackageName](const TSharedPtr<FDLCPackage>& Package) {
+			return (Package->Name == PackageName);
+		});
+	return DLCPackagePtrPtr ? DLCPackagePtrPtr->Get() : nullptr;
+}
+
+FDLCPackageManager::FDLCPackage* FDLCPackageManager::FindDLCPackage(const FString& PackageName)
+{
+	const FDLCPackage* ConstPackage = const_cast<const FDLCPackageManager*>(this)->FindDLCPackage(PackageName);
+	return const_cast<FDLCPackage*>(ConstPackage);
 }
